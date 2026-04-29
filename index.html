@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>MR. DEV LOG - Visión Artificial</title>
+
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #000;
+      overflow: hidden;
+      touch-action: none;
+      font-family: monospace;
+      color: #fff;
+    }
+
+    .tactical-ui {
+      backdrop-filter: blur(8px);
+      background: rgba(10, 10, 10, 0.85);
+      border: 1px solid rgba(255, 50, 50, 0.3);
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      transition: all 0.3s ease;
+    }
+    
+    .tactical-ui.detected {
+      border-color: rgba(255, 0, 0, 0.8);
+      box-shadow: 0 0 15px rgba(255, 0, 0, 0.2);
+      color: #ff3333;
+    }
+  </style>
+</head>
+
+<body>
+<div id="root"></div>
+
+<script>
+const { useEffect, useRef, useState } = React;
+
+function App() {
+  const [status, setStatus] = useState("INICIALIZANDO SENSORES...");
+  const [isDetected, setIsDetected] = useState(false);
+
+  const videoRef = useRef();
+  const threeCanvasRef = useRef();
+  const hudCanvasRef = useRef();
+  
+  const shaderMatRef = useRef(null);
+  const faceMeshRef = useRef(null);
+  const handsRef = useRef(null);
+  
+  // Referencias para dibujar sin atar al estado de React
+  const latestFace = useRef(null);
+  const latestHands = useRef(null);
+
+  useEffect(() => {
+    // Inicia directamente sin pedir interacción previa (solo permiso de cámara estándar del navegador)
+    initThree();
+    initMediaPipe();
+  }, []);
+
+  function initMediaPipe() {
+    // Modelo de Rostro
+    const faceMesh = new FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+    faceMesh.onResults((res) => { latestFace.current = res.multiFaceLandmarks; });
+    faceMeshRef.current = faceMesh;
+
+    // Modelo de Manos
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 0, // Optimizado para móviles
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+    hands.onResults((res) => { latestHands.current = res.multiHandLandmarks; });
+    handsRef.current = hands;
+
+    // Control de Cámara
+    const camera = new Camera(videoRef.current, {
+      onFrame: async () => {
+        const videoObj = { image: videoRef.current };
+        if (faceMeshRef.current) await faceMeshRef.current.send(videoObj);
+        if (handsRef.current) await handsRef.current.send(videoObj);
+      },
+      width: 1280,
+      height: 720,
+      facingMode: "environment" // Cambia a "user" si usas cámara frontal
+    });
+    
+    camera.start().then(() => {
+      setStatus("BUSCANDO OBJETIVO...");
+    }).catch(err => {
+      alert("Error accediendo a la cámara: " + err.message);
+      setStatus("FALLO DE HARDWARE");
+    });
+  }
+
+  // Bucle principal de dibujo del HUD y actualización de lógica visual
+  function renderHUD() {
+    if (!hudCanvasRef.current || !videoRef.current) return;
+    
+    const canvas = hudCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width = window.innerWidth;
+    const h = canvas.height = window.innerHeight;
+    
+    ctx.clearRect(0, 0, w, h);
+
+    const faces = latestFace.current;
+    const handsData = latestHands.current;
+    
+    const faceDetected = faces && faces.length > 0;
+    const handDetected = handsData && handsData.length > 0;
+    const detected = faceDetected || handDetected;
+
+    setIsDetected(detected);
+    
+    if (detected) {
+      setStatus(faceDetected && handDetected ? "HUMANO DETECTADO" : (faceDetected ? "HUMANO DETECTADO" : "HUMANO DETECTADO"));
+    } else {
+      setStatus("BUSCANDO OBJETIVO...");
+    }
+
+    // Efecto en el Shader
+    if (shaderMatRef.current) {
+      const targetVal = detected ? 1.0 : 0.0;
+      shaderMatRef.current.uniforms.uDetected.value += (targetVal - shaderMatRef.current.uniforms.uDetected.value) * 0.15;
+    }
+
+    if (detected) {
+      const vw = videoRef.current.videoWidth;
+      const vh = videoRef.current.videoHeight;
+      if(vw === 0) return;
+
+      const wA = w / h;
+      const vA = vw / vh;
+
+      let drawW, drawH, offsetX = 0, offsetY = 0;
+      if (wA > vA) {
+        drawW = w; drawH = w / vA; offsetY = (h - drawH) / 2;
+      } else {
+        drawH = h; drawW = h * vA; offsetX = (w - drawW) / 2;
+      }
+
+      ctx.save();
+      ctx.translate(offsetX, offsetY);
+      ctx.scale(drawW, drawH);
+
+      ctx.lineWidth = 1.5 / drawW; 
+
+      // Helper para dibujar líneas
+      const drawConns = (landmarks, connections, color) => {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        connections.forEach(pair => {
+          const p1 = landmarks[pair[0]];
+          const p2 = landmarks[pair[1]];
+          if(p1 && p2) {
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+          }
+        });
+        ctx.stroke();
+      };
+
+      // Dibujar Rostro
+      if (faceDetected) {
+        const face = faces[0];
+        if (window.FACEMESH_FACE_OVAL) drawConns(face, window.FACEMESH_FACE_OVAL, "rgba(255, 50, 50, 0.8)");
+        if (window.FACEMESH_LEFT_EYE) drawConns(face, window.FACEMESH_LEFT_EYE, "rgba(255, 0, 0, 1)");
+        if (window.FACEMESH_RIGHT_EYE) drawConns(face, window.FACEMESH_RIGHT_EYE, "rgba(255, 0, 0, 1)");
+        if (window.FACEMESH_LIPS) drawConns(face, window.FACEMESH_LIPS, "rgba(255, 100, 50, 0.9)");
+      }
+
+      // Dibujar Manos
+      if (handDetected) {
+        handsData.forEach(hand => {
+          if (window.HAND_CONNECTIONS) drawConns(hand, window.HAND_CONNECTIONS, "rgba(255, 150, 50, 0.9)");
+        });
+      }
+
+      ctx.restore();
+    }
+
+    requestAnimationFrame(renderHUD);
+  }
+
+  function initThree() {
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    const renderer = new THREE.WebGLRenderer({ canvas: threeCanvasRef.current, antialias: false });
+
+    const videoTexture = new THREE.VideoTexture(videoRef.current);
+    videoTexture.minFilter = THREE.LinearFilter;
+    videoTexture.magFilter = THREE.LinearFilter;
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uTexture: { value: videoTexture },
+        time: { value: 0.0 },
+        resolution: { value: new THREE.Vector2() },
+        videoResolution: { value: new THREE.Vector2(1280, 720) },
+        uDetected: { value: 0.0 }
+      },
+      fragmentShader: `
+        uniform sampler2D uTexture;
+        uniform float time;
+        uniform vec2 resolution;
+        uniform vec2 videoResolution;
+        uniform float uDetected;
+        varying vec2 vUv;
+
+        float rand(vec2 co) {
+            return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+        }
+
+        void main() {
+          vec2 ratio = vec2(
+            min((resolution.x / resolution.y) / (videoResolution.x / videoResolution.y), 1.0),
+            min((videoResolution.x / videoResolution.y) / (resolution.x / resolution.y), 1.0)
+          );
+          vec2 uv = vec2(0.5) + (vUv - vec2(0.5)) * ratio;
+
+          // Glitch dinámico
+          float glitchIntensity = 0.02 + (uDetected * 0.05);
+          float blockSize = 0.05;
+          vec2 block = floor(uv / blockSize);
+          float noise = rand(block + floor(time * 12.0));
+          
+          if (noise > (0.95 - (uDetected * 0.1))) { 
+            uv.x += (rand(block) - 0.5) * glitchIntensity;
+          }
+
+          // Distorsión y Aberración cromática
+          float offsetAmount = (0.005 + uDetected * 0.01) * sin(time * 5.0);
+          vec4 color;
+          color.r = texture2D(uTexture, uv + vec2(offsetAmount, 0.0)).r;
+          color.g = texture2D(uTexture, uv).g;
+          color.b = texture2D(uTexture, uv - vec2(offsetAmount, 0.0)).b;
+
+          // Scanline
+          float scanline = sin(uv.y * resolution.y * 0.8) * 0.05;
+          color.rgb -= scanline;
+          
+          // Tinte Base Táctico -> Rojo cuando detecta
+          vec3 baseTint = vec3(0.3, 0.35, 0.3);
+          vec3 alertTint = vec3(0.6, 0.1, 0.1);
+          vec3 finalTint = mix(baseTint, alertTint, uDetected);
+          
+          color.rgb = mix(color.rgb, finalTint, 0.4 + (uDetected * 0.2));
+
+          // Viñeta
+          float vignette = uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y);
+          color.rgb *= smoothstep(0.0, 0.15, vignette) + 0.3;
+
+          gl_FragColor = vec4(color.rgb, 1.0);
+        }
+      `,
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `
+    });
+
+    shaderMatRef.current = material;
+
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+
+    function resize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      material.uniforms.resolution.value.set(width, height);
+    }
+
+    window.addEventListener("resize", resize);
+    window.addEventListener("orientationchange", () => setTimeout(resize, 100));
+
+    function animate(t) {
+      material.uniforms.time.value = t * 0.001;
+      if (videoRef.current && videoRef.current.videoWidth > 0) {
+        material.uniforms.videoResolution.value.set(videoRef.current.videoWidth, videoRef.current.videoHeight);
+      }
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+
+    resize();
+    animate();
+    renderHUD(); // Inicia el bucle de dibujo de MediaPipe
+  }
+
+  return (
+    React.createElement("div", { className: "w-screen h-screen flex flex-col relative bg-black" },
+      React.createElement("video", {
+        ref: videoRef,
+        playsInline: true,
+        muted: true,
+        className: "hidden"
+      }),
+
+      React.createElement("canvas", {
+        ref: threeCanvasRef,
+        className: "absolute top-0 left-0 w-full h-full object-cover z-0"
+      }),
+
+      React.createElement("canvas", {
+        ref: hudCanvasRef,
+        className: "absolute top-0 left-0 w-full h-full pointer-events-none z-10"
+      }),
+
+      React.createElement("div", {
+        className: `absolute bottom-8 left-1/2 -translate-x-1/2 px-6 py-2 rounded tactical-ui text-xs font-bold text-center z-20 flex flex-col gap-1 ${isDetected ? 'detected' : 'text-gray-400'}`
+      }, 
+        React.createElement("span", null, "MR. DEV LOG"),
+        React.createElement("span", { className: "text-sm" }, status)
+      )
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+
+</body>
+</html>
