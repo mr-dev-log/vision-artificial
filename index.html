@@ -40,6 +40,11 @@
       box-shadow: 0 0 15px rgba(255, 0, 0, 0.2);
       color: #ff3333;
     }
+
+    /* Animación para el cambio de cámara */
+    .fade-transition {
+      transition: opacity 0.3s ease-in-out;
+    }
   </style>
 </head>
 
@@ -52,59 +57,84 @@ const { useEffect, useRef, useState } = React;
 function App() {
   const [status, setStatus] = useState("INICIALIZANDO SENSORES...");
   const [isDetected, setIsDetected] = useState(false);
+  const [cameraMode, setCameraMode] = useState("environment");
 
-  const videoRef = useRef();
-  const threeCanvasRef = useRef();
-  const hudCanvasRef = useRef();
+  const videoRef = useRef(null);
+  const threeCanvasRef = useRef(null);
+  const hudCanvasRef = useRef(null);
   
   const shaderMatRef = useRef(null);
   const faceMeshRef = useRef(null);
   const handsRef = useRef(null);
+  const cameraInstance = useRef(null);
   
-  // Referencias para dibujar sin atar al estado de React
+  // Referencias para dibujar sin atar al estado de React y evitar re-renders lentos
   const latestFace = useRef(null);
   const latestHands = useRef(null);
 
   useEffect(() => {
-    // Inicia directamente sin pedir interacción previa (solo permiso de cámara estándar del navegador)
     initThree();
-    initMediaPipe();
+    initMediaPipe("environment");
+    requestAnimationFrame(renderHUD);
   }, []);
 
-  function initMediaPipe() {
-    // Modelo de Rostro
-    const faceMesh = new FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
-    faceMesh.setOptions({
-      maxNumFaces: 1,
-      refineLandmarks: true,
-      minDetectionConfidence: 0.6,
-      minTrackingConfidence: 0.6
-    });
-    faceMesh.onResults((res) => { latestFace.current = res.multiFaceLandmarks; });
-    faceMeshRef.current = faceMesh;
+  function toggleCamera() {
+    setStatus("RECALIBRANDO SENSOR...");
+    const newMode = cameraMode === "environment" ? "user" : "environment";
+    setCameraMode(newMode);
+    
+    // Detener la cámara actual para liberar el hardware del móvil
+    if (cameraInstance.current) {
+      cameraInstance.current.stop();
+    }
+    
+    // Reiniciar con el nuevo modo
+    setTimeout(() => {
+      initMediaPipe(newMode);
+    }, 100);
+  }
 
-    // Modelo de Manos
-    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-    hands.setOptions({
-      maxNumHands: 2,
-      modelComplexity: 0, // Optimizado para móviles
-      minDetectionConfidence: 0.6,
-      minTrackingConfidence: 0.6
-    });
-    hands.onResults((res) => { latestHands.current = res.multiHandLandmarks; });
-    handsRef.current = hands;
+  function initMediaPipe(mode) {
+    // Solo instanciamos los modelos si no existen previamente para ahorrar memoria
+    if (!faceMeshRef.current) {
+      const faceMesh = new FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      });
+      faceMesh.onResults((res) => { latestFace.current = res.multiFaceLandmarks; });
+      faceMeshRef.current = faceMesh;
+    }
 
-    // Control de Cámara
+    if (!handsRef.current) {
+      const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      });
+      hands.onResults((res) => { latestHands.current = res.multiHandLandmarks; });
+      handsRef.current = hands;
+    }
+
+    // Instanciar el utilitario de cámara de MediaPipe
     const camera = new Camera(videoRef.current, {
       onFrame: async () => {
-        const videoObj = { image: videoRef.current };
-        if (faceMeshRef.current) await faceMeshRef.current.send(videoObj);
-        if (handsRef.current) await handsRef.current.send(videoObj);
+        if (videoRef.current && videoRef.current.readyState >= 2) {
+          const videoObj = { image: videoRef.current };
+          if (faceMeshRef.current) await faceMeshRef.current.send(videoObj);
+          if (handsRef.current) await handsRef.current.send(videoObj);
+        }
       },
       width: 1280,
       height: 720,
-      facingMode: "environment" // Cambia a "user" si usas cámara frontal
+      facingMode: mode
     });
+    
+    cameraInstance.current = camera;
     
     camera.start().then(() => {
       setStatus("BUSCANDO OBJETIVO...");
@@ -114,9 +144,11 @@ function App() {
     });
   }
 
-  // Bucle principal de dibujo del HUD y actualización de lógica visual
   function renderHUD() {
-    if (!hudCanvasRef.current || !videoRef.current) return;
+    if (!hudCanvasRef.current || !videoRef.current) {
+      requestAnimationFrame(renderHUD);
+      return;
+    }
     
     const canvas = hudCanvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -136,21 +168,19 @@ function App() {
     
     if (detected) {
       setStatus(faceDetected && handDetected ? "HUMANO DETECTADO" : (faceDetected ? "HUMANO DETECTADO" : "HUMANO DETECTADO"));
-    } else {
+    } else if (status !== "RECALIBRANDO SENSOR...") {
       setStatus("BUSCANDO OBJETIVO...");
     }
 
-    // Efecto en el Shader
+    // Actualizar variable de Three.js suavemente
     if (shaderMatRef.current) {
       const targetVal = detected ? 1.0 : 0.0;
       shaderMatRef.current.uniforms.uDetected.value += (targetVal - shaderMatRef.current.uniforms.uDetected.value) * 0.15;
     }
 
-    if (detected) {
+    if (detected && videoRef.current.videoWidth > 0) {
       const vw = videoRef.current.videoWidth;
       const vh = videoRef.current.videoHeight;
-      if(vw === 0) return;
-
       const wA = w / h;
       const vA = vw / vh;
 
@@ -164,10 +194,8 @@ function App() {
       ctx.save();
       ctx.translate(offsetX, offsetY);
       ctx.scale(drawW, drawH);
-
       ctx.lineWidth = 1.5 / drawW; 
 
-      // Helper para dibujar líneas
       const drawConns = (landmarks, connections, color) => {
         ctx.strokeStyle = color;
         ctx.beginPath();
@@ -182,7 +210,6 @@ function App() {
         ctx.stroke();
       };
 
-      // Dibujar Rostro
       if (faceDetected) {
         const face = faces[0];
         if (window.FACEMESH_FACE_OVAL) drawConns(face, window.FACEMESH_FACE_OVAL, "rgba(255, 50, 50, 0.8)");
@@ -191,13 +218,11 @@ function App() {
         if (window.FACEMESH_LIPS) drawConns(face, window.FACEMESH_LIPS, "rgba(255, 100, 50, 0.9)");
       }
 
-      // Dibujar Manos
       if (handDetected) {
         handsData.forEach(hand => {
           if (window.HAND_CONNECTIONS) drawConns(hand, window.HAND_CONNECTIONS, "rgba(255, 150, 50, 0.9)");
         });
       }
-
       ctx.restore();
     }
 
@@ -207,7 +232,6 @@ function App() {
   function initThree() {
     const scene = new THREE.Scene();
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
     const renderer = new THREE.WebGLRenderer({ canvas: threeCanvasRef.current, antialias: false });
 
     const videoTexture = new THREE.VideoTexture(videoRef.current);
@@ -241,8 +265,7 @@ function App() {
           );
           vec2 uv = vec2(0.5) + (vUv - vec2(0.5)) * ratio;
 
-          // Glitch dinámico
-          float glitchIntensity = 0.02 + (uDetected * 0.05);
+          float glitchIntensity = 0.02 + (uDetected * 0.06);
           float blockSize = 0.05;
           vec2 block = floor(uv / blockSize);
           float noise = rand(block + floor(time * 12.0));
@@ -251,25 +274,21 @@ function App() {
             uv.x += (rand(block) - 0.5) * glitchIntensity;
           }
 
-          // Distorsión y Aberración cromática
-          float offsetAmount = (0.005 + uDetected * 0.01) * sin(time * 5.0);
+          float offsetAmount = (0.005 + uDetected * 0.015) * sin(time * 5.0);
           vec4 color;
           color.r = texture2D(uTexture, uv + vec2(offsetAmount, 0.0)).r;
           color.g = texture2D(uTexture, uv).g;
           color.b = texture2D(uTexture, uv - vec2(offsetAmount, 0.0)).b;
 
-          // Scanline
           float scanline = sin(uv.y * resolution.y * 0.8) * 0.05;
           color.rgb -= scanline;
           
-          // Tinte Base Táctico -> Rojo cuando detecta
           vec3 baseTint = vec3(0.3, 0.35, 0.3);
           vec3 alertTint = vec3(0.6, 0.1, 0.1);
           vec3 finalTint = mix(baseTint, alertTint, uDetected);
           
-          color.rgb = mix(color.rgb, finalTint, 0.4 + (uDetected * 0.2));
+          color.rgb = mix(color.rgb, finalTint, 0.4 + (uDetected * 0.25));
 
-          // Viñeta
           float vignette = uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y);
           color.rgb *= smoothstep(0.0, 0.15, vignette) + 0.3;
 
@@ -286,7 +305,6 @@ function App() {
     });
 
     shaderMatRef.current = material;
-
     const geometry = new THREE.PlaneGeometry(2, 2);
     const mesh = new THREE.Mesh(geometry, material);
     scene.add(mesh);
@@ -313,11 +331,15 @@ function App() {
 
     resize();
     animate();
-    renderHUD(); // Inicia el bucle de dibujo de MediaPipe
   }
 
+  // Clase para invertir la imagen si es cámara frontal (efecto espejo)
+  const mirrorClass = cameraMode === "user" ? "-scale-x-100" : "";
+
   return (
-    React.createElement("div", { className: "w-screen h-screen flex flex-col relative bg-black" },
+    React.createElement("div", { className: "w-screen h-screen flex flex-col relative bg-black overflow-hidden" },
+      
+      // Video fuente
       React.createElement("video", {
         ref: videoRef,
         playsInline: true,
@@ -325,18 +347,27 @@ function App() {
         className: "hidden"
       }),
 
-      React.createElement("canvas", {
-        ref: threeCanvasRef,
-        className: "absolute top-0 left-0 w-full h-full object-cover z-0"
-      }),
+      // Contenedor de visualización con efecto espejo dinámico
+      React.createElement("div", { className: `absolute inset-0 w-full h-full transition-transform duration-300 ${mirrorClass}` },
+        React.createElement("canvas", {
+          ref: threeCanvasRef,
+          className: "absolute top-0 left-0 w-full h-full object-cover z-0"
+        }),
+        React.createElement("canvas", {
+          ref: hudCanvasRef,
+          className: "absolute top-0 left-0 w-full h-full pointer-events-none z-10"
+        })
+      ),
 
-      React.createElement("canvas", {
-        ref: hudCanvasRef,
-        className: "absolute top-0 left-0 w-full h-full pointer-events-none z-10"
-      }),
+      // Botón para cambiar de cámara (UI no se invierte por el espejo)
+      React.createElement("button", {
+        onClick: toggleCamera,
+        className: "absolute top-6 right-6 px-4 py-2 rounded tactical-ui z-30 text-white text-xs cursor-pointer hover:bg-red-900/30 active:scale-95"
+      }, cameraMode === "environment" ? "[ CAM: REAR ]" : "[ CAM: FRONT ]"),
 
+      // Interfaz inferior
       React.createElement("div", {
-        className: `absolute bottom-8 left-1/2 -translate-x-1/2 px-6 py-2 rounded tactical-ui text-xs font-bold text-center z-20 flex flex-col gap-1 ${isDetected ? 'detected' : 'text-gray-400'}`
+        className: `absolute bottom-8 left-1/2 -translate-x-1/2 px-6 py-2 rounded tactical-ui text-xs font-bold text-center z-20 flex flex-col gap-1 w-max ${isDetected ? 'detected' : 'text-gray-400'}`
       }, 
         React.createElement("span", null, "MR. DEV LOG"),
         React.createElement("span", { className: "text-sm" }, status)
