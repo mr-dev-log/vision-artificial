@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
   <title>MR. DEV LOG - Visión Artificial</title>
 
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
@@ -40,11 +40,6 @@
       box-shadow: 0 0 15px rgba(255, 0, 0, 0.2);
       color: #ff3333;
     }
-
-    /* Animación para el cambio de cámara */
-    .fade-transition {
-      transition: opacity 0.3s ease-in-out;
-    }
   </style>
 </head>
 
@@ -60,6 +55,7 @@ function App() {
   const [cameraMode, setCameraMode] = useState("environment");
 
   const videoRef = useRef(null);
+  const containerRef = useRef(null); // Referencia maestra para calcular dimensiones exactas
   const threeCanvasRef = useRef(null);
   const hudCanvasRef = useRef(null);
   
@@ -68,7 +64,6 @@ function App() {
   const handsRef = useRef(null);
   const cameraInstance = useRef(null);
   
-  // Referencias para dibujar sin atar al estado de React y evitar re-renders lentos
   const latestFace = useRef(null);
   const latestHands = useRef(null);
 
@@ -83,19 +78,16 @@ function App() {
     const newMode = cameraMode === "environment" ? "user" : "environment";
     setCameraMode(newMode);
     
-    // Detener la cámara actual para liberar el hardware del móvil
     if (cameraInstance.current) {
       cameraInstance.current.stop();
     }
     
-    // Reiniciar con el nuevo modo
     setTimeout(() => {
       initMediaPipe(newMode);
     }, 100);
   }
 
   function initMediaPipe(mode) {
-    // Solo instanciamos los modelos si no existen previamente para ahorrar memoria
     if (!faceMeshRef.current) {
       const faceMesh = new FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
       faceMesh.setOptions({
@@ -120,7 +112,9 @@ function App() {
       handsRef.current = hands;
     }
 
-    // Instanciar el utilitario de cámara de MediaPipe
+    // Calcula si el teléfono está en vertical para pedir la resolución correcta y evitar márgenes negros
+    const isPortrait = window.innerHeight > window.innerWidth;
+
     const camera = new Camera(videoRef.current, {
       onFrame: async () => {
         if (videoRef.current && videoRef.current.readyState >= 2) {
@@ -129,8 +123,8 @@ function App() {
           if (handsRef.current) await handsRef.current.send(videoObj);
         }
       },
-      width: 1280,
-      height: 720,
+      width: isPortrait ? 720 : 1280,
+      height: isPortrait ? 1280 : 720,
       facingMode: mode
     });
     
@@ -145,15 +139,18 @@ function App() {
   }
 
   function renderHUD() {
-    if (!hudCanvasRef.current || !videoRef.current) {
+    if (!hudCanvasRef.current || !videoRef.current || !containerRef.current) {
       requestAnimationFrame(renderHUD);
       return;
     }
     
     const canvas = hudCanvasRef.current;
     const ctx = canvas.getContext('2d');
-    const w = canvas.width = window.innerWidth;
-    const h = canvas.height = window.innerHeight;
+    
+    // CORRECCIÓN CLAVE: Usar clientWidth/Height del contenedor exacto, no del "Window"
+    const rect = containerRef.current.getBoundingClientRect();
+    const w = canvas.width = rect.width;
+    const h = canvas.height = rect.height;
     
     ctx.clearRect(0, 0, w, h);
 
@@ -172,7 +169,6 @@ function App() {
       setStatus("BUSCANDO OBJETIVO...");
     }
 
-    // Actualizar variable de Three.js suavemente
     if (shaderMatRef.current) {
       const targetVal = detected ? 1.0 : 0.0;
       shaderMatRef.current.uniforms.uDetected.value += (targetVal - shaderMatRef.current.uniforms.uDetected.value) * 0.15;
@@ -310,8 +306,10 @@ function App() {
     scene.add(mesh);
 
     function resize() {
-      const width = window.innerWidth;
-      const height = window.innerHeight;
+      if (!containerRef.current) return;
+      // CORRECCIÓN CLAVE: Usar dimensiones del DOM, no de la ventana
+      const width = containerRef.current.clientWidth;
+      const height = containerRef.current.clientHeight;
       renderer.setSize(width, height);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
       material.uniforms.resolution.value.set(width, height);
@@ -329,17 +327,17 @@ function App() {
       requestAnimationFrame(animate);
     }
 
-    resize();
+    // Un pequeño delay en la carga inicial asegura que el DOM ya midió todo
+    setTimeout(resize, 50); 
     animate();
   }
 
-  // Clase para invertir la imagen si es cámara frontal (efecto espejo)
   const mirrorClass = cameraMode === "user" ? "-scale-x-100" : "";
 
   return (
-    React.createElement("div", { className: "w-screen h-screen flex flex-col relative bg-black overflow-hidden" },
+    // Reemplacé h-screen/w-screen por fixed inset-0 para evitar errores de CSS en móviles
+    React.createElement("div", { className: "fixed inset-0 bg-black overflow-hidden" },
       
-      // Video fuente
       React.createElement("video", {
         ref: videoRef,
         playsInline: true,
@@ -347,25 +345,26 @@ function App() {
         className: "hidden"
       }),
 
-      // Contenedor de visualización con efecto espejo dinámico
-      React.createElement("div", { className: `absolute inset-0 w-full h-full transition-transform duration-300 ${mirrorClass}` },
+      // Este contenedor es el que dicta el tamaño verdadero de visualización
+      React.createElement("div", { 
+        ref: containerRef,
+        className: `absolute inset-0 w-full h-full transition-transform duration-300 ${mirrorClass}` 
+      },
         React.createElement("canvas", {
           ref: threeCanvasRef,
-          className: "absolute top-0 left-0 w-full h-full object-cover z-0"
+          className: "absolute inset-0 w-full h-full z-0"
         }),
         React.createElement("canvas", {
           ref: hudCanvasRef,
-          className: "absolute top-0 left-0 w-full h-full pointer-events-none z-10"
+          className: "absolute inset-0 w-full h-full pointer-events-none z-10"
         })
       ),
 
-      // Botón para cambiar de cámara (UI no se invierte por el espejo)
       React.createElement("button", {
         onClick: toggleCamera,
         className: "absolute top-6 right-6 px-4 py-2 rounded tactical-ui z-30 text-white text-xs cursor-pointer hover:bg-red-900/30 active:scale-95"
       }, cameraMode === "environment" ? "[ CAM: REAR ]" : "[ CAM: FRONT ]"),
 
-      // Interfaz inferior
       React.createElement("div", {
         className: `absolute bottom-8 left-1/2 -translate-x-1/2 px-6 py-2 rounded tactical-ui text-xs font-bold text-center z-20 flex flex-col gap-1 w-max ${isDetected ? 'detected' : 'text-gray-400'}`
       }, 
